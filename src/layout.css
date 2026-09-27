@@ -1,0 +1,346 @@
+/*
+ * Mission-control layout layer.
+ *
+ * Loaded after App.css. The recovered sheet is the design system (tokens,
+ * glass, typography, components); this file re-arranges the app so the globe
+ * IS the interface: a full-bleed interactive stage with a bottom-docked
+ * mission deck and a slide-up setup sheet, instead of a centered webform.
+ */
+
+/* ── Stage: the globe fills the viewport under the top bar ───────────── */
+
+.globeStage {
+  position: absolute;
+  inset: 64px 0 0 0; /* below the fixed top bar */
+  overflow: hidden;
+}
+
+.globeStage .flightGlobe {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+  border: none;
+  border-radius: 0;
+}
+
+/* Keep the globe's vignette but let clicks pass to pins/orbit controls. */
+.globeStage .flightGlobe:after {
+  z-index: 2;
+}
+
+/* Search overlay floats top-left of the stage (already glass). */
+.globeStage .globeSearchOverlay {
+  top: 20px;
+  left: 20px;
+  width: min(300px, 40vw);
+}
+
+/* The hint pill sits above the mission deck, not under it. */
+.globeStage .globeHint {
+  bottom: 150px;
+  z-index: 8;
+  max-width: calc(100vw - 48px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.globeStage .globePreviewPanel {
+  top: 20px;
+  right: 20px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+/* Status messages float under the top bar, centered. */
+.globeStage .unlockToast,
+.globeStage .summary,
+.globeStage .error {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 8px 18px;
+  border-radius: var(--r-full);
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border-dim);
+  z-index: 9;
+  white-space: nowrap;
+}
+
+/* The top-bar telemetry label must never wrap into a tower. */
+.telemetry .label {
+  white-space: nowrap;
+}
+
+/* ── Mission deck: bottom-docked glass bar — launch or fly ───────────── */
+
+.missionDeck {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  width: min(880px, calc(100vw - 48px));
+  padding: 16px 24px;
+  border-radius: var(--r-lg);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-top: 1px solid var(--glass-border);
+  border-left: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-soft);
+}
+
+.missionSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* Route readout: DEP ——✈—— DST, monospaced like a flight strip. */
+.routeReadout {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: "Geist", "Inter", sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+.routeEnd {
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--primary);
+  line-height: 1;
+}
+
+.routeEnd.empty {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.routeLine {
+  position: relative;
+  flex: 0 0 120px;
+  height: 1px;
+  background: var(--glass-border);
+  transition: background 0.4s ease;
+}
+
+.routeLine:after {
+  content: "✈";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -52%);
+  font-size: 13px;
+  color: var(--text-dim);
+  background: transparent;
+  transition: color 0.4s ease;
+}
+
+.routeLine.active {
+  background: var(--primary-dim);
+}
+
+.routeLine.active:after {
+  color: var(--primary);
+  text-shadow: 0 0 10px var(--primary-glow, rgba(87, 241, 219, 0.4));
+}
+
+.missionMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  min-width: 0;
+}
+
+.missionPhase {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+
+.missionPhase.phase-touchdown {
+  color: var(--tertiary);
+}
+
+.missionHint {
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+}
+
+.missionStats {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.missionActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* ── Setup sheet: slide-up glass panel over the stage ────────────────── */
+
+.setupSheet {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  z-index: 11;
+  width: min(720px, calc(100vw - 48px));
+  padding: 20px 24px;
+  border-radius: var(--r-lg);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-top: 1px solid var(--glass-border);
+  border-left: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-soft);
+  animation: sheet-rise 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes sheet-rise {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.setupGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  align-items: flex-end;
+}
+
+.setupGrid .field {
+  flex: 1 1 160px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 140px;
+}
+
+.setupGrid .field .label {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.setupActions {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.setupNote {
+  margin: 14px 0 0;
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+}
+
+/* The extras panel (achievements + data) lives inside the sheet. */
+.setupSheet .extrasPanel {
+  margin: 18px 0 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setupSheet {
+    animation: none;
+  }
+}
+
+/* ── WebGL fallback (sandboxed browsers, broken GPU drivers) ─────────── */
+
+.globeFallback {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.globeFallbackTitle {
+  font-size: 42px;
+  font-weight: 300;
+  letter-spacing: -0.03em;
+  color: var(--text);
+}
+
+.globeFallbackCopy {
+  max-width: 420px;
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.globeFallback .globeSearchOverlay {
+  position: static;
+  width: min(340px, 80vw);
+  margin-top: 20px;
+}
+
+.globeFallbackPanel {
+  position: static;
+  margin-top: 16px;
+  pointer-events: auto;
+  text-align: left;
+}
+
+/* ── Small windows (the Tauri window is 800×600) ─────────────────────── */
+
+@media (max-width: 720px) {
+  .missionDeck {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+    padding: 14px 18px;
+  }
+
+  .missionActions {
+    justify-content: flex-end;
+  }
+
+  .routeLine {
+    flex: 1 1 60px;
+  }
+
+  .missionStats {
+    margin-left: 0;
+  }
+
+  .globeStage .globeSearchOverlay {
+    width: min(260px, 60vw);
+  }
+
+  .globeStage .globePreviewPanel {
+    display: none; /* the deck carries the essentials on small windows */
+  }
+}

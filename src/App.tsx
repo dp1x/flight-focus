@@ -1,36 +1,29 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTheme } from "./focus/theme";
-import { setAudioVolume, startAudioForMode, stopAudio } from "./focus/audio";
 import {
-  type AchievementStatus,
   type AudioMode,
-  type FocusSession,
   type Phase,
   initializeFocus,
-  createFocusSession,
-  tickFocusSession,
-  pauseFocusSession,
-  resumeFocusSession,
-  skipFocusSession,
-  resetFocusSession,
-  currentFocusSession,
   loadFocusStats,
-  loadAchievements,
-  setJourney,
-  getJourney,
+  runningInTauri,
 } from "./focus/api";
+import { useFocusSession, type AudioPreset } from "./state/useFocusSession";
+import { useJourney } from "./state/useJourney";
+import { useAchievements } from "./state/useAchievements";
 import FlightGlobeView from "./map/FlightGlobeView";
-import AirportSearch, { type Airport } from "./map/AirportSearch";
+import { type Airport } from "./map/AirportSearch";
 import AchievementsPanel from "./components/AchievementsPanel";
 import DataControls from "./components/DataControls";
 import airportsData from "./data/airports.json";
+import {
+  DEFAULT_DURATION_MINUTES,
+  clampDurationMinutes,
+  formatDuration,
+} from "./focus/time";
 import "./App.css";
+import "./layout.css";
 
-const DEFAULT_DURATION_MINUTES = 25;
-const TICK_INTERVAL_MS = 1000;
 const AIRPORTS = airportsData as Airport[];
-
-type AudioPreset = Extract<AudioMode, { type: string }>;
 
 const AUDIO_OPTIONS: { value: AudioPreset; label: string }[] = [
   { value: { type: "none" }, label: "Off" },
@@ -43,252 +36,112 @@ const AUDIO_OPTIONS: { value: AudioPreset; label: string }[] = [
   },
 ];
 
-function useAppStartup() {
-  const [ready, setReady] = useState(false);
+/** Long-form phase copy for the timer hero. */
+const PHASE_TEXT: Record<Phase, string> = {
+  idle: "Ready for departure",
+  takeoff: "Climbing",
+  cruise: "In cruise",
+  touchdown: "Landing",
+  rest: "On the ground",
+};
 
-  useEffect(() => {
-    initializeFocus()
-      .then(() => setReady(true))
-      .catch(console.error);
-  }, []);
-
-  return ready;
-}
-
-function formatDuration(seconds: number) {
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-
-  if (h > 0) {
-    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  }
-
-  return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-function clampDurationMinutes(value: number) {
-  return Math.max(5, Math.min(180, value || DEFAULT_DURATION_MINUTES));
-}
+/** Short phase copy for the status pill in the top bar. */
+const PHASE_PILL: Record<Phase, string> = {
+  idle: "Standby",
+  takeoff: "Takeoff",
+  cruise: "In flight",
+  touchdown: "Landing",
+  rest: "Standby",
+};
 
 export default function App() {
-  const ready = useAppStartup();
-  const { theme } = useTheme();
-  const [running, setRunning] = useState(false);
-  const [session, setSession] = useState<FocusSession | undefined>(undefined);
+  const [ready, setReady] = useState(false);
+  const [startupError, setStartupError] = useState<string | null>(null);
+  const { theme, setTheme } = useTheme();
   const [selectedDurationMinutes, setSelectedDurationMinutes] = useState(
     DEFAULT_DURATION_MINUTES,
   );
   const [audio, setAudio] = useState<AudioPreset>({ type: "none" });
   const [volume, setVolume] = useState(0.7);
-  const [stats, setStats] = useState<{ totalSessions: number; totalMinutes: number }>({
-    totalSessions: 0,
-    totalMinutes: 0,
-  });
-  const [achievements, setAchievements] = useState<AchievementStatus[]>([]);
-  const [lastSummary, setLastSummary] = useState<string | null>(null);
-  const [unlockToast, setUnlockToast] = useState<string | null>(null);
-  const [cpError, setCpError] = useState<string | null>(null);
-  const [departure, setDeparture] = useState<Airport | null>(null);
-  const [destination, setDestination] = useState<Airport | null>(null);
-  const [mapView, setMapView] = useState(false);
+  const [showControls, setShowControls] = useState(false);
   const [showExtras, setShowExtras] = useState(false);
-  const achievementsRef = useRef<AchievementStatus[]>([]);
+  const [stats, setStats] = useState({ totalSessions: 0, totalMinutes: 0 });
 
-  achievementsRef.current = achievements;
-
-  const refreshStats = async () => {
-    const nextStats = await loadFocusStats();
+  const refreshStats = useCallback(async () => {
+    const next = await loadFocusStats();
     setStats({
-      totalSessions: nextStats.totalSessions,
-      totalMinutes: nextStats.totalMinutes,
+      totalSessions: next.totalSessions,
+      totalMinutes: next.totalMinutes,
     });
-  };
+  }, []);
 
-  const refreshAchievements = async (previous?: AchievementStatus[]) => {
-    const next = await loadAchievements();
-    setAchievements(next);
+  const {
+    achievements,
+    unlockToast,
+    refreshWithToast,
+    refresh: refreshAchievements,
+  } = useAchievements(ready);
 
-    if (previous) {
-      const newlyUnlocked = next.filter(
-        (item) =>
-          item.unlocked &&
-          !previous.some((prev) => prev.id === item.id && prev.unlocked),
-      );
-      if (newlyUnlocked.length > 0) {
-        setUnlockToast(
-          newlyUnlocked.map((item) => `${item.icon} ${item.title} unlocked`).join(" · "),
-        );
-      }
-    }
-  };
+  const {
+    departure,
+    destination,
+    setDeparture,
+    setDestination,
+    clearDeparture,
+    clearDestination,
+    reload: reloadJourney,
+  } = useJourney(ready, AIRPORTS, refreshWithToast);
 
-  useEffect(() => {
-    if (!ready) return;
-
-    getJourney()
-      .then((journey) => {
-        if (!journey) return;
-        const dep = AIRPORTS.find((airport) => airport.code === journey.departureCode);
-        const dest = AIRPORTS.find((airport) => airport.code === journey.destinationCode);
-        if (dep) setDeparture(dep);
-        if (dest) setDestination(dest);
-      })
-      .catch(console.error);
-  }, [ready]);
+  const { session, running, lastSummary, error, start, pause, resume, skip, reset } =
+    useFocusSession({
+      ready,
+      volume,
+      onEnded: async () => {
+        await refreshStats();
+        await refreshWithToast();
+      },
+    });
 
   useEffect(() => {
-    if (!ready) return;
-
-    currentFocusSession()
-      .then((current) => {
-        if (current?.completed) {
-          setSession(undefined);
-          setRunning(false);
-          return;
-        }
-        setSession(current ?? undefined);
-        setRunning(false);
-      })
-      .catch(console.error);
-
-    refreshStats().catch(console.error);
-    refreshAchievements().catch(console.error);
-  }, [ready]);
-
-  useEffect(() => {
-    if (!unlockToast) return;
-    const id = window.setTimeout(() => setUnlockToast(null), 5000);
-    return () => window.clearTimeout(id);
-  }, [unlockToast]);
-
-  useEffect(() => {
-    if (!ready || !running || !session) return;
-
-    const id = window.setInterval(() => {
-      tickFocusSession(1)
-        .then(async (nextSession) => {
-          setCpError(null);
-
-          if (nextSession.completed) {
-            setSession(undefined);
-            setRunning(false);
-            setLastSummary(`Completed ${formatDuration(nextSession.totalDurationSeconds)} flown`);
-            await stopAudio();
-            await refreshStats();
-            await refreshAchievements(achievementsRef.current);
-            return;
-          }
-
-          setSession(nextSession);
-        })
-        .catch((e) => {
-          setCpError(String(e));
-          setRunning(false);
-        });
-    }, TICK_INTERVAL_MS);
-
-    return () => window.clearInterval(id);
-  }, [ready, running, session?.id]);
-
-  useEffect(() => {
-    if (!session || !running || session.completed) {
-      void stopAudio();
-      return;
-    }
-
-    void startAudioForMode(session.audio, volume);
-    return () => {
-      void stopAudio();
-    };
-  }, [session?.id, session?.audio, running, volume]);
-
-  useEffect(() => {
-    setAudioVolume(volume).catch(console.error);
-  }, [volume]);
-
-  useEffect(() => {
-    if (!ready || !departure || !destination) return;
-    setJourney(departure.code, destination.code)
-      .then(() => refreshAchievements(achievementsRef.current))
-      .catch(console.error);
-  }, [departure?.code, destination?.code, ready]);
-
-  const startSession = async () => {
-    setCpError(null);
-    setLastSummary(null);
-
-    try {
-      const nextSession = await createFocusSession({
-        durationSeconds: selectedDurationMinutes * 60,
-        audioMode: audio,
+    initializeFocus()
+      .then(() => setReady(true))
+      .catch((e) => {
+        setStartupError(String(e));
+        // Still enter the app: a failed init should not strand the user on an
+        // endless loading screen.
+        setReady(true);
       });
-      setSession(nextSession);
-      setRunning(true);
-    } catch (e) {
-      setCpError(String(e));
-    }
-  };
+  }, []);
 
-  const pauseSession = async () => {
-    setCpError(null);
+  useEffect(() => {
+    if (!ready) return;
+    refreshStats().catch((e) => console.error("failed to load stats", e));
+  }, [ready, refreshStats]);
 
-    try {
-      const nextSession = await pauseFocusSession();
-      setSession(nextSession);
-      setRunning(false);
-    } catch (e) {
-      setCpError(String(e));
-    }
-  };
+  // Keyboard-first mission control: space starts/resumes, K pauses.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable ||
+          target.tagName === "SELECT");
+      if (typing || e.metaKey || e.ctrlKey || e.altKey) return;
 
-  const resumeSession = async () => {
-    setCpError(null);
-
-    try {
-      const nextSession = await resumeFocusSession();
-      setSession(nextSession);
-      setRunning(true);
-    } catch (e) {
-      setCpError(String(e));
-    }
-  };
-
-  const skipSession = async () => {
-    setCpError(null);
-
-    try {
-      const summary = await skipFocusSession();
-      if (summary) {
-        setLastSummary(`Skipped at ${summary.phase} after ${formatDuration(summary.durationSeconds)} flown`);
+      if (e.code === "Space") {
+        e.preventDefault();
+        if (!session) void start(selectedDurationMinutes, audio);
+        else if (!running) void resume();
+      } else if (e.key.toLowerCase() === "k" && session && running) {
+        e.preventDefault();
+        void pause();
       }
-      setSession(undefined);
-      setRunning(false);
-      await stopAudio();
-      await refreshStats();
-      await refreshAchievements(achievementsRef.current);
-    } catch (e) {
-      setCpError(String(e));
-    }
-  };
-
-  const reset = async () => {
-    setCpError(null);
-
-    try {
-      await resetFocusSession();
-      await stopAudio();
-      setSession(undefined);
-      setRunning(false);
-    } catch (e) {
-      setCpError(String(e));
-    }
-  };
-
-  const swapAirports = () => {
-    setDeparture(destination);
-    setDestination(departure);
-  };
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [session, running, start, resume, pause, selectedDurationMinutes, audio]);
 
   const phaseLabel: Phase = session?.phase ?? "idle";
   const visibleSeconds = session
@@ -299,6 +152,7 @@ export default function App() {
       ? (session.totalDurationSeconds - session.remainingSeconds) /
         session.totalDurationSeconds
       : undefined;
+  const currentAudioType: AudioMode["type"] = audio.type;
 
   if (!ready) {
     return (
@@ -308,202 +162,133 @@ export default function App() {
     );
   }
 
-  // Circular progress ring: fraction of the session elapsed (0–1).
-  const ringFraction =
-    session && session.totalDurationSeconds > 0
-      ? Math.min(
-          1,
-          Math.max(
-            0,
-            (session.totalDurationSeconds - session.remainingSeconds) /
-              session.totalDurationSeconds,
-          ),
-        )
-      : 0;
-  const RING_RADIUS = 0.46; // relative to the svg viewBox (0–1)
-  const RING_CIRCUM = 2 * Math.PI * RING_RADIUS;
-
   return (
-    <main className="appShell" data-theme={theme}>
-      {/* Fixed top navigation */}
+    <main className="appShell">
       <header className="topBar">
-        <div className="topBarLeft">
-          <span className="brandWordmark">Zeitreise</span>
-          <nav className="topNav" aria-label="Primary">
-            <span className="topNavLink active">Missions</span>
-            <span className="topNavLink">Logs</span>
-          </nav>
+        <div className="brand">
+          <span className="brandMark" aria-hidden="true">
+            ✈
+          </span>
+          Flight Focus
         </div>
+
         <div className="topBarRight">
           <div className="telemetry">
-            <span className="telemetryLabel">Estimated Mission Time</span>
-            <span className="telemetryValue">
-              {formatDuration(visibleSeconds).padStart(8, "0")}
+            <span className="label">
+              {session ? "Time to landing" : "Estimated mission time"}
+            </span>
+            <span className="value">
+              {formatDuration(visibleSeconds).padStart(7, "0")}
             </span>
           </div>
+          <span className="pill" data-phase={phaseLabel}>
+            {PHASE_PILL[phaseLabel]}
+          </span>
           <button
-            className="iconBtn"
+            className="btn ghost"
             type="button"
-            aria-label="Settings"
-            onClick={() => setShowExtras((v) => !v)}
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
           >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-              <path d="M12 15a3 3 0 100-6 3 3 0 000 6z" stroke="currentColor" strokeWidth="1.6"/>
-              <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 008 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004 15a1.65 1.65 0 00-1.51-1H2a2 2 0 110-4h.09A1.65 1.65 0 003.6 8a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 008 4a1.65 1.65 0 001-1.51V2a2 2 0 114 0v.09A1.65 1.65 0 0014 3.6a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 8a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z" stroke="currentColor" strokeWidth="1.6"/>
-            </svg>
+            {theme === "dark" ? "Light" : "Dark"}
           </button>
         </div>
       </header>
 
-      {/* Collapsing left sidebar (Cockpit / Telemetry / Navigation / Logs) */}
-      <aside className="sideRail" aria-label="Sections">
-        <div className="railBrand">
-          <span className="railIcon" aria-hidden="true">◎</span>
-          <span className="railLabel">Cockpit</span>
-        </div>
-        <div className="railItems">
-          <button
-            className={`railItem${!mapView ? " active" : ""}`}
-            type="button"
-            onClick={() => setMapView(false)}
-          >
-            <span className="railIcon" aria-hidden="true">◎</span>
-            <span className="railLabel">Cockpit</span>
-          </button>
-          <button
-            className="railItem"
-            type="button"
-            onClick={() => { setShowExtras(true); }}
-          >
-            <span className="railIcon" aria-hidden="true">≣</span>
-            <span className="railLabel">Telemetry</span>
-          </button>
-          <button
-            className={`railItem${mapView ? " active" : ""}`}
-            type="button"
-            onClick={() => setMapView(true)}
-            disabled={!departure && !destination}
-          >
-            <span className="railIcon" aria-hidden="true">◈</span>
-            <span className="railLabel">Navigation</span>
-          </button>
-          <button
-            className="railItem"
-            type="button"
-            onClick={() => setShowExtras((v) => !v)}
-          >
-            <span className="railIcon" aria-hidden="true">◷</span>
-            <span className="railLabel">Logs</span>
-          </button>
-        </div>
-      </aside>
+      {/* THE GLOBE IS THE APP. It fills the stage below the top bar. */}
+      <div className="globeStage">
+        <FlightGlobeView
+          departure={departure}
+          destination={destination}
+          flightProgress={flightProgress}
+          phase={session?.phase}
+          airports={AIRPORTS}
+          onSelectDeparture={setDeparture}
+          onSelectDestination={setDestination}
+          onClearDeparture={clearDeparture}
+          onClearDestination={clearDestination}
+        />
 
-      <div className="appContent">
-        <section className="journeyBar" aria-label="Flight selection">
-          <div className="airportField">
-            <span className="label">Departure</span>
-            <AirportSearch
-              selected={departure}
-              onSelect={setDeparture}
-              placeholder="Departure"
-              id="departure"
-            />
+        {/* Bottom-docked mission deck: launch or fly, one surface. */}
+        <section className="missionDeck" aria-label="Mission controls">
+          <div className="missionSummary">
+            <div className="routeReadout" aria-hidden="true">
+              <span className={`routeEnd${departure ? "" : " empty"}`}>
+                {departure ? departure.code : "---"}
+              </span>
+              <span className={`routeLine${departure && destination ? " active" : ""}`} />
+              <span className={`routeEnd${destination ? "" : " empty"}`}>
+                {destination ? destination.code : "---"}
+              </span>
+            </div>
+            <div className="missionMeta">
+              {session ? (
+                <span className={`missionPhase phase-${phaseLabel}`}>
+                  {PHASE_TEXT[phaseLabel]}
+                </span>
+              ) : (
+                <span className="missionHint">
+                  Pick two airports to plan a flight
+                </span>
+              )}
+              <span className="missionStats">
+                {stats.totalSessions} missions · {stats.totalMinutes} min flown
+              </span>
+            </div>
           </div>
-          <button
-            className="swapBtn"
-            onClick={swapAirports}
-            title="Swap airports"
-            type="button"
-            aria-label="Swap departure and destination"
-          >
-            ⇄
-          </button>
-          <div className="airportField">
-            <span className="label">Destination</span>
-            <AirportSearch
-              selected={destination}
-              onSelect={setDestination}
-              placeholder="Destination"
-              id="destination"
-            />
+
+          <div className="missionActions">
+            {!session && (
+              <button
+                className="btn primary"
+                type="button"
+                onClick={() => {
+                  setShowControls(false);
+                  void start(selectedDurationMinutes, audio);
+                }}
+              >
+                {departure && destination ? "Begin flight" : "Practice flight"}
+              </button>
+            )}
+            {session && running && (
+              <button className="btn" type="button" onClick={() => void pause()}>
+                Pause
+              </button>
+            )}
+            {session && !running && (
+              <button
+                className="btn primary"
+                type="button"
+                onClick={() => void resume()}
+              >
+                Resume
+              </button>
+            )}
+            {session && (
+              <button className="btn ghost" type="button" onClick={() => void skip()}>
+                Skip
+              </button>
+            )}
+            {session && (
+              <button className="btn ghost" type="button" onClick={() => void reset()}>
+                Reset
+              </button>
+            )}
+            <button
+              className="btn ghost"
+              type="button"
+              onClick={() => setShowControls((v) => !v)}
+              aria-expanded={showControls}
+            >
+              {showControls ? "Hide setup" : "Setup"}
+            </button>
           </div>
         </section>
 
-        <div className="viewToggleRow">
-          {(departure || destination) && (
-            <button
-              className="mapToggleBtn"
-              onClick={() => setMapView((value) => !value)}
-              type="button"
-            >
-              {mapView ? "Show timer" : "Show map"}
-            </button>
-          )}
-          <button
-            className="mapToggleBtn"
-            onClick={() => setShowExtras((value) => !value)}
-            type="button"
-          >
-            {showExtras ? "Hide progress" : "Progress & data"}
-          </button>
-        </div>
-
-        {unlockToast && <p className="unlockToast">{unlockToast}</p>}
-
-        {mapView ? (
-          <div className="mapStage">
-            <FlightGlobeView
-              departure={departure}
-              destination={destination}
-              flightProgress={flightProgress}
-              phase={session?.phase}
-              airports={AIRPORTS}
-              onSelectDeparture={setDeparture}
-              onSelectDestination={setDestination}
-              onClearDeparture={() => setDeparture(null)}
-              onClearDestination={() => setDestination(null)}
-            />
-          </div>
-        ) : (
-          <>
-            <section className="timerHero" data-phase={phaseLabel}>
-              <div className="timerRing">
-                <svg
-                  className="ringProgress"
-                  viewBox="0 0 1 1"
-                  preserveAspectRatio="xMidYMid meet"
-                  aria-hidden="true"
-                >
-                  <circle className="ringTrack" cx="0.5" cy="0.5" r={RING_RADIUS} />
-                  <circle
-                    className="ringFill"
-                    cx="0.5"
-                    cy="0.5"
-                    r={RING_RADIUS}
-                    strokeDasharray={RING_CIRCUM}
-                    strokeDashoffset={RING_CIRCUM * (1 - ringFraction)}
-                  />
-                </svg>
-                <div className="timerCore">
-                  <time className="durationText" aria-live="polite">
-                    {formatDuration(visibleSeconds)}
-                  </time>
-                  <p className="phaseHint">
-                    {phaseLabel === "takeoff"
-                      ? "Climbing"
-                      : phaseLabel === "cruise"
-                        ? "In cruise"
-                        : phaseLabel === "touchdown"
-                          ? "Landing"
-                          : phaseLabel === "rest"
-                            ? "On the ground"
-                            : "Ready for departure"}
-                  </p>
-                </div>
-              </div>
-            </section>
-
-            <section className="controls">
+        {/* Slide-up setup sheet: duration, audio, volume, progress, data. */}
+        {showControls && (
+          <div className="setupSheet" role="dialog" aria-label="Flight setup">
+            <div className="setupGrid">
               {!session && (
                 <label className="field">
                   <span className="label">Duration (minutes)</span>
@@ -511,29 +296,27 @@ export default function App() {
                     type="number"
                     min={5}
                     max={180}
+                    className="input"
                     value={selectedDurationMinutes}
                     onChange={(e) =>
-                      setSelectedDurationMinutes(clampDurationMinutes(Number(e.target.value)))
+                      setSelectedDurationMinutes(
+                        clampDurationMinutes(Number(e.target.value)),
+                      )
                     }
-                    className="input"
                   />
                 </label>
               )}
 
               <label className="field">
-                <span className="label">Audio</span>
+                <span className="label">Ambient audio</span>
                 <select
                   className="select"
-                  value={audio.type}
+                  value={currentAudioType}
                   onChange={(e) => {
-                    const raw = e.target.value;
-                    if (raw === "none") setAudio({ type: "none" });
-                    else if (raw === "white_noise") setAudio({ type: "white_noise" });
-                    else if (raw === "brown_noise") setAudio({ type: "brown_noise" });
-                    else if (raw === "cabin_hum") setAudio({ type: "cabin_hum" });
-                    else if (raw === "binaural_beats") {
-                      setAudio({ type: "binaural_beats", frequencyHz: 200, brainwave: "focus" });
-                    }
+                    const option = AUDIO_OPTIONS.find(
+                      (opt) => opt.value.type === e.target.value,
+                    );
+                    if (option) setAudio(option.value);
                   }}
                 >
                   {AUDIO_OPTIONS.map((opt) => (
@@ -556,70 +339,50 @@ export default function App() {
                 />
               </label>
 
-              <div className="btnRow">
-                {!session && (
-                  <button onClick={startSession} className="btn primary" type="button">
-                    Initiate Flight
-                  </button>
-                )}
-                {session && running && (
-                  <button onClick={pauseSession} className="btn" type="button">
-                    Pause
-                  </button>
-                )}
-                {session && !running && (
-                  <button onClick={resumeSession} className="btn primary" type="button">
-                    Resume
-                  </button>
-                )}
-                {session && (
-                  <button onClick={skipSession} className="btn" type="button">
-                    Skip
-                  </button>
-                )}
-                {session && (
-                  <button onClick={reset} className="btn ghost" type="button">
-                    Reset
-                  </button>
-                )}
+              <div className="setupActions">
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={() => setShowExtras((v) => !v)}
+                >
+                  {showExtras ? "Hide progress" : "Progress & data"}
+                </button>
+                <button
+                  className="btn ghost"
+                  type="button"
+                  onClick={() => setShowControls(false)}
+                >
+                  Done
+                </button>
               </div>
-            </section>
+            </div>
 
-            {lastSummary && <p className="summary">{lastSummary}</p>}
+            {!runningInTauri && (
+              <p className="setupNote">
+                Browser preview mode — sessions are held in memory only. Run the
+                packaged app for persistent history.
+              </p>
+            )}
 
-            {cpError && <p className="error">{cpError}</p>}
-
-            <footer className="statsBar">
-              <div>
-                <span className="value">{stats.totalSessions}</span>
-                <span className="label">Missions</span>
+            {showExtras && (
+              <div className="extrasPanel">
+                <AchievementsPanel achievements={achievements} />
+                <DataControls
+                  onImported={async () => {
+                    await refreshStats();
+                    await refreshAchievements();
+                    await reloadJourney();
+                  }}
+                />
               </div>
-              <div>
-                <span className="value">{stats.totalMinutes}</span>
-                <span className="label">Minutes flown</span>
-              </div>
-            </footer>
-          </>
-        )}
-
-        {showExtras && (
-          <div className="extrasPanel">
-            <AchievementsPanel achievements={achievements} />
-            <DataControls
-              onImported={async () => {
-                await refreshStats();
-                await refreshAchievements();
-                const journey = await getJourney();
-                if (journey) {
-                  const dep = AIRPORTS.find((airport) => airport.code === journey.departureCode);
-                  const dest = AIRPORTS.find((airport) => airport.code === journey.destinationCode);
-                  if (dep) setDeparture(dep);
-                  if (dest) setDestination(dest);
-                }
-              }}
-            />
+            )}
           </div>
         )}
+
+        {unlockToast && <p className="unlockToast">{unlockToast}</p>}
+        {lastSummary && <p className="summary">{lastSummary}</p>}
+        {startupError && <p className="error">{startupError}</p>}
+        {error && <p className="error">{error}</p>}
       </div>
     </main>
   );

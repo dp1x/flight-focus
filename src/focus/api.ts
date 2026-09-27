@@ -38,8 +38,6 @@ export interface FocusStats {
   longestStreak: number;
 }
 
-export type SessionCommand = "pause" | "resume" | "skip" | "reset";
-
 export type AchievementId =
   | "first_flight"
   | "ten_flights"
@@ -74,99 +72,186 @@ export interface ImportResult {
 }
 
 // ---------------------------------------------------------------------------
-// IPC helpers via Tauri
+// Backend contract
 // ---------------------------------------------------------------------------
-import { invoke } from "@tauri-apps/api/core";
 
-function unwrap<T>(value: unknown): T {
-  return value as T;
+/**
+ * The full set of backend operations the UI needs. Inside the Tauri shell this
+ * is backed by the Rust engine over IPC; outside it (plain browser preview) the
+ * same contract is served by the in-memory demo backend, so the app is fully
+ * explorable instead of crashing on the first `invoke`.
+ */
+export interface FocusBackend {
+  initialize(): Promise<void>;
+  createSession(payload: CreateSessionPayload): Promise<FocusSession>;
+  tick(dtSeconds: number): Promise<FocusSession>;
+  pause(): Promise<FocusSession>;
+  resume(): Promise<FocusSession>;
+  skip(): Promise<SessionSummary | null>;
+  reset(): Promise<void>;
+  complete(): Promise<SessionSummary>;
+  current(): Promise<FocusSession | null>;
+  stats(): Promise<FocusStats>;
+  setJourney(
+    departureCode: string,
+    destinationCode: string,
+  ): Promise<{ departureCode: string; destinationCode: string }>;
+  getJourney(): Promise<{
+    departureCode: string;
+    destinationCode: string;
+  } | null>;
+  achievements(): Promise<AchievementStatus[]>;
+  exportData(): Promise<FocusExportBundle>;
+  importData(bundleJson: string, merge: boolean): Promise<ImportResult>;
 }
 
+// ---------------------------------------------------------------------------
+// Tauri backend — real Rust engine over IPC
+// ---------------------------------------------------------------------------
+
+import { invoke } from "@tauri-apps/api/core";
+import { createDemoBackend } from "./demo-backend";
+
+const tauriBackend: FocusBackend = {
+  async initialize() {
+    await invoke("initialize_focus");
+  },
+  async createSession(payload) {
+    const audioModeJson = payload.audioMode
+      ? JSON.stringify(payload.audioMode)
+      : undefined;
+    return invoke<FocusSession>("create_focus_session", {
+      durationSeconds: payload.durationSeconds,
+      audioModeJson,
+    });
+  },
+  async tick(dtSeconds) {
+    return invoke<FocusSession>("tick_focus_session", { dtSeconds });
+  },
+  async pause() {
+    return invoke<FocusSession>("pause_focus_session");
+  },
+  async resume() {
+    return invoke<FocusSession>("resume_focus_session");
+  },
+  async skip() {
+    return invoke<SessionSummary | null>("skip_focus_session");
+  },
+  async reset() {
+    await invoke("reset_focus_session");
+  },
+  async complete() {
+    return invoke<SessionSummary>("complete_focus_session");
+  },
+  async current() {
+    return invoke<FocusSession | null>("current_focus_session");
+  },
+  async stats() {
+    return invoke<FocusStats>("focus_stats");
+  },
+  async setJourney(departureCode, destinationCode) {
+    return invoke("set_journey", { departureCode, destinationCode });
+  },
+  async getJourney() {
+    return invoke<{
+      departureCode: string;
+      destinationCode: string;
+    } | null>("get_journey");
+  },
+  async achievements() {
+    return invoke<AchievementStatus[]>("focus_achievements");
+  },
+  async exportData() {
+    return invoke<FocusExportBundle>("export_focus_data");
+  },
+  async importData(bundleJson, merge) {
+    return invoke<ImportResult>("import_focus_data", { bundleJson, merge });
+  },
+};
+
+/**
+ * Runtime backend selection. `__TAURI_INTERNALS__` is injected by the Tauri
+ * webview; its absence means we are a plain browser tab, so use the demo
+ * backend rather than throwing on every call.
+ */
+export const runningInTauri =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+export const backend: FocusBackend = runningInTauri
+  ? tauriBackend
+  : createDemoBackend();
+
+// ---------------------------------------------------------------------------
+// Public API — same names as before, so call sites are unaffected
+// ---------------------------------------------------------------------------
+
 export async function initializeFocus(): Promise<void> {
-  await invoke<void>("initialize_focus");
+  await backend.initialize();
 }
 
 export async function createFocusSession(
   payload: CreateSessionPayload,
 ): Promise<FocusSession> {
-  const audioJson = payload.audioMode
-    ? JSON.stringify(payload.audioMode)
-    : undefined;
-  return unwrap<FocusSession>(
-    await invoke("create_focus_session", {
-      durationSeconds: payload.durationSeconds,
-      audioModeJson: audioJson,
-    }),
-  );
+  return backend.createSession(payload);
 }
 
 export async function tickFocusSession(dtSeconds: number): Promise<FocusSession> {
-  return unwrap<FocusSession>(await invoke("tick_focus_session", { dtSeconds }));
+  return backend.tick(dtSeconds);
 }
 
 export async function pauseFocusSession(): Promise<FocusSession> {
-  return unwrap<FocusSession>(await invoke("pause_focus_session"));
+  return backend.pause();
 }
 
 export async function resumeFocusSession(): Promise<FocusSession> {
-  return unwrap<FocusSession>(await invoke("resume_focus_session"));
+  return backend.resume();
 }
 
 export async function skipFocusSession(): Promise<SessionSummary | null> {
-  return unwrap<SessionSummary | null>(await invoke("skip_focus_session"));
+  return backend.skip();
 }
 
 export async function resetFocusSession(): Promise<void> {
-  await invoke("reset_focus_session");
+  await backend.reset();
 }
 
 export async function completeFocusSession(): Promise<SessionSummary> {
-  return unwrap<SessionSummary>(await invoke("complete_focus_session"));
+  return backend.complete();
 }
 
 export async function currentFocusSession(): Promise<FocusSession | null> {
-  return unwrap<FocusSession | null>(await invoke("current_focus_session"));
+  return backend.current();
 }
 
 export async function loadFocusStats(): Promise<FocusStats> {
-  return unwrap<FocusStats>(await invoke("focus_stats"));
+  return backend.stats();
 }
 
 export async function setJourney(
   departureCode: string,
   destinationCode: string,
 ): Promise<{ departureCode: string; destinationCode: string }> {
-  return unwrap<{ departureCode: string; destinationCode: string }>(
-    await invoke("set_journey", {
-      departureCode,
-      destinationCode,
-    }),
-  );
+  return backend.setJourney(departureCode, destinationCode);
 }
 
 export async function getJourney(): Promise<{
   departureCode: string;
   destinationCode: string;
 } | null> {
-  return unwrap<{
-    departureCode: string;
-    destinationCode: string;
-  } | null>(await invoke("get_journey"));
+  return backend.getJourney();
 }
 
 export async function loadAchievements(): Promise<AchievementStatus[]> {
-  return unwrap<AchievementStatus[]>(await invoke("focus_achievements"));
+  return backend.achievements();
 }
 
 export async function exportFocusData(): Promise<FocusExportBundle> {
-  return unwrap<FocusExportBundle>(await invoke("export_focus_data"));
+  return backend.exportData();
 }
 
 export async function importFocusData(
   bundleJson: string,
   merge = true,
 ): Promise<ImportResult> {
-  return unwrap<ImportResult>(
-    await invoke("import_focus_data", { bundleJson, merge }),
-  );
+  return backend.importData(bundleJson, merge);
 }

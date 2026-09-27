@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
@@ -12,7 +12,6 @@ import {
 } from "./geo";
 import type { Phase } from "../focus/api";
 import type { Airport } from "./AirportSearch";
-import "./FlightGlobe.css";
 
 interface FlightGlobeProps {
   departure: Airport | null;
@@ -25,15 +24,20 @@ interface FlightGlobeProps {
   onClearSelection: () => void;
   hoveredAirport: Airport | null;
   setHoveredAirport: (a: Airport | null) => void;
+  /** External request to spin the globe to a location (e.g. from search). */
+  spinRequest?: { lat: number; lng: number; nonce: number } | null;
 }
+
+// Scratch vectors reused every frame so culling does not allocate.
+const _normal = new THREE.Vector3();
+const _toCamera = new THREE.Vector3();
+const _worldPos = new THREE.Vector3();
 
 // ---------------------------------------------------------------------------
 // Globe sphere + atmosphere rim
 // ---------------------------------------------------------------------------
 
 function GlobeSphere() {
-  const rimRef = useRef<THREE.Mesh>(null);
-
   // Atmosphere fresnel: a slightly larger back-face sphere with a glow shader.
   const atmosphereMaterial = useMemo(() => {
     return new THREE.ShaderMaterial({
@@ -66,24 +70,15 @@ function GlobeSphere() {
       {/* Solid dark core */}
       <mesh>
         <sphereGeometry args={[GLOBE_RADIUS, 64, 64]} />
-        <meshStandardMaterial
-          color="#0e0e0e"
-          roughness={0.92}
-          metalness={0.05}
-        />
+        <meshStandardMaterial color="#0e0e0e" roughness={0.92} metalness={0.05} />
       </mesh>
       {/* Fine graticule wireframe for a stylized "instrument" feel */}
       <mesh>
         <sphereGeometry args={[GLOBE_RADIUS + 0.002, 36, 24]} />
-        <meshBasicMaterial
-          color="#2dd4bf"
-          wireframe
-          transparent
-          opacity={0.08}
-        />
+        <meshBasicMaterial color="#2dd4bf" wireframe transparent opacity={0.08} />
       </mesh>
       {/* Atmosphere rim */}
-      <mesh ref={rimRef} material={atmosphereMaterial} scale={1.16}>
+      <mesh material={atmosphereMaterial} scale={1.16}>
         <sphereGeometry args={[GLOBE_RADIUS, 48, 48]} />
       </mesh>
     </group>
@@ -116,9 +111,7 @@ function AirportPin({
     [airport.lat, airport.lng],
   );
 
-  // Pin color by role.
-  // Pin color by role — Stitch palette: teal for active states,
-  // white/secondary for standby, dim white for neutral.
+  // Pin color by role: teal for selected ends, bright white for idle pins.
   const color =
     role === "departure"
       ? "#57f1db"
@@ -131,8 +124,22 @@ function AirportPin({
   const isActive = role !== "none" || isHovered;
   const scale = isHovered ? 1.6 : 1.0;
 
+  // Back-face culling: hide pins on the far side of the globe so they cannot
+  // be hovered or clicked through the planet. Three.js raycasting skips
+  // invisible objects, so this also blocks interaction, not just rendering.
+  const groupRef = useRef<THREE.Group>(null);
+  const { camera } = useThree();
+  useFrame(() => {
+    const group = groupRef.current;
+    if (!group) return;
+    group.getWorldPosition(_worldPos);
+    _normal.copy(_worldPos).normalize();
+    _toCamera.copy(camera.position).sub(_worldPos);
+    group.visible = _normal.dot(_toCamera) > 0;
+  });
+
   return (
-    <group position={position}>
+    <group ref={groupRef} position={position}>
       {/* Core dot */}
       <mesh
         onPointerOver={(e) => {
@@ -189,10 +196,10 @@ function FlightArc({
   reducedMotion: boolean;
 }) {
   const points = useMemo(() => buildFlightArc(start, end), [start, end]);
-  const geometry = useMemo(() => {
-    const g = new THREE.BufferGeometry().setFromPoints(points);
-    return g;
-  }, [points]);
+  const geometry = useMemo(
+    () => new THREE.BufferGeometry().setFromPoints(points),
+    [points],
+  );
 
   const planeRef = useRef<THREE.Mesh>(null);
 
@@ -209,17 +216,13 @@ function FlightArc({
         points.length - 1,
         Math.max(0, Math.floor(effectiveProgress * (points.length - 1))),
       );
-      if (planeRef.current) {
-        planeRef.current.position.copy(points[idx]);
-      }
+      planeRef.current?.position.copy(points[idx]);
     } else if (!reducedMotion) {
       idleT.current = (idleT.current + delta * 0.08) % 1;
       const idx = Math.floor(idleT.current * (points.length - 1));
-      if (planeRef.current) {
-        planeRef.current.position.copy(points[idx]);
-      }
-    } else if (planeRef.current) {
-      planeRef.current.position.copy(points[0]);
+      planeRef.current?.position.copy(points[idx]);
+    } else {
+      planeRef.current?.position.copy(points[0]);
     }
   });
 
@@ -233,7 +236,7 @@ function FlightArc({
     return points.slice(0, cutoff + 1);
   }, [points, effectiveProgress]);
 
-  // Construct THREE.Line objects directly to avoid the JSX <line> tag, which
+  // THREE.Line objects built directly to avoid the JSX <line> tag, which
   // TypeScript resolves to the SVG <line> element type.
   const fullArcLine = useMemo(() => {
     const mat = new THREE.LineBasicMaterial({
@@ -297,21 +300,17 @@ function GlobeGroup({
     autoRotateActive.current = false;
   }, [spinTarget]);
 
-  // Pause auto-rotate while the user drags.
+  // Pause auto-rotate while the user drags, resume after a short idle.
   useEffect(() => {
     if (!controls) return;
     const onStart = () => {
       autoRotateActive.current = false;
     };
     const onEnd = () => {
-      // Resume auto-rotate after a short delay if no spin is pending.
-      if (!isAnimatingToTarget.current) {
-        const id = window.setTimeout(() => {
-          if (!isAnimatingToTarget.current) autoRotateActive.current = true;
-        }, 2000);
-        // No cleanup needed; this is a soft resume.
-        void id;
-      }
+      if (isAnimatingToTarget.current) return;
+      window.setTimeout(() => {
+        if (!isAnimatingToTarget.current) autoRotateActive.current = true;
+      }, 2000);
     };
     controls.addEventListener("start", onStart);
     controls.addEventListener("end", onEnd);
@@ -326,7 +325,7 @@ function GlobeGroup({
     if (!group) return;
 
     if (isAnimatingToTarget.current) {
-      // Slerp current rotation toward target.
+      // Slerp current rotation toward the target.
       const cur = group.quaternion.clone();
       const next = cur.slerp(targetQuat.current, Math.min(1, delta * 2.5));
       group.quaternion.copy(next);
@@ -360,6 +359,7 @@ export default function FlightGlobe({
   onClearSelection,
   hoveredAirport,
   setHoveredAirport,
+  spinRequest,
 }: FlightGlobeProps) {
   const [reducedMotion, setReducedMotion] = useState(false);
   const [spinTarget, setSpinTarget] = useState<{
@@ -377,6 +377,12 @@ export default function FlightGlobe({
     media.addEventListener("change", sync);
     return () => media.removeEventListener("change", sync);
   }, []);
+
+  // An external spin request (e.g. selecting a search result) drives the same
+  // spin-to-target animation that pin clicks use.
+  useEffect(() => {
+    if (spinRequest) setSpinTarget(spinRequest);
+  }, [spinRequest]);
 
   // Global Backspace/Delete handling: clear destination, then departure.
   useEffect(() => {
