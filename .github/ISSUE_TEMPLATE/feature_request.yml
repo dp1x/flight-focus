@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a capability or improvement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: Describe the need, not the implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+    validations:
+      required: false
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      description: This project is offline-only, local-first, and privacy-preserving.
+      options:
+        - label: This feature works with no network access
+          required: true
+        - label: This feature adds no telemetry, accounts, or hidden network calls
+          required: true
