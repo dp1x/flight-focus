@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import {
@@ -7,6 +14,7 @@ import {
   PIN_OFFSET,
   latLngToVector3,
   buildFlightArc,
+  buildCoastlinePositions,
   phaseProgress,
   rotationToFace,
 } from "./geo";
@@ -28,153 +36,224 @@ interface FlightGlobeProps {
   spinRequest?: { lat: number; lng: number; nonce: number } | null;
 }
 
-// Scratch vectors reused every frame so culling does not allocate.
-const _normal = new THREE.Vector3();
+// Scratch objects reused every frame so the render loop never allocates.
+const _dir = new THREE.Vector3();
 const _toCamera = new THREE.Vector3();
 const _worldPos = new THREE.Vector3();
+const _worldQuat = new THREE.Quaternion();
+const _matrix = new THREE.Matrix4();
+const _scale = new THREE.Vector3();
+const _tangent = new THREE.Vector3();
+const IDENTITY_QUAT = new THREE.Quaternion();
+const UP = new THREE.Vector3(0, 1, 0);
 
 // ---------------------------------------------------------------------------
-// Globe sphere + atmosphere rim
+// Globe sphere, coastlines, atmosphere rim
 // ---------------------------------------------------------------------------
 
 function GlobeSphere() {
-  // Atmosphere fresnel: a slightly larger back-face sphere with a glow shader.
-  const atmosphereMaterial = useMemo(() => {
-    return new THREE.ShaderMaterial({
-      uniforms: {
-        glowColor: { value: new THREE.Color("#2dd4bf") },
-      },
-      vertexShader: /* glsl */ `
-        varying vec3 vNormal;
-        void main() {
-          vNormal = normalize(normalMatrix * normal);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: /* glsl */ `
-        uniform vec3 glowColor;
-        varying vec3 vNormal;
-        void main() {
-          float intensity = pow(0.72 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 2.5);
-          gl_FragColor = vec4(glowColor, 1.0) * intensity;
-        }
-      `,
-      side: THREE.BackSide,
-      blending: THREE.AdditiveBlending,
-      transparent: true,
-    });
-  }, []);
+  // Atmosphere fresnel: a slightly larger back-face sphere with a rim shader.
+  // Physically motivated (planets have atmospheres), kept subtle.
+  const atmosphereMaterial = useMemo(
+    () =>
+      new THREE.ShaderMaterial({
+        uniforms: {
+          glowColor: { value: new THREE.Color("#2dd4bf") },
+        },
+        vertexShader: /* glsl */ `
+          varying vec3 vNormal;
+          void main() {
+            vNormal = normalize(normalMatrix * normal);
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          uniform vec3 glowColor;
+          varying vec3 vNormal;
+          void main() {
+            float intensity = pow(0.75 - dot(vNormal, vec3(0.0, 0.0, 1.0)), 3.0);
+            gl_FragColor = vec4(glowColor, 1.0) * intensity;
+          }
+        `,
+        side: THREE.BackSide,
+        blending: THREE.AdditiveBlending,
+        transparent: true,
+        depthWrite: false,
+      }),
+    [],
+  );
+  useEffect(() => () => atmosphereMaterial.dispose(), [atmosphereMaterial]);
 
   return (
     <group>
-      {/* Solid dark core */}
+      {/* Solid dark core; the directional light draws a soft day/night limb. */}
       <mesh>
-        <sphereGeometry args={[GLOBE_RADIUS, 64, 64]} />
-        <meshStandardMaterial color="#0e0e0e" roughness={0.92} metalness={0.05} />
-      </mesh>
-      {/* Fine graticule wireframe for a stylized "instrument" feel */}
-      <mesh>
-        <sphereGeometry args={[GLOBE_RADIUS + 0.002, 36, 24]} />
-        <meshBasicMaterial color="#2dd4bf" wireframe transparent opacity={0.08} />
+        <sphereGeometry args={[GLOBE_RADIUS, 64, 48]} />
+        <meshStandardMaterial color="#101516" roughness={0.9} metalness={0.05} />
       </mesh>
       {/* Atmosphere rim */}
-      <mesh material={atmosphereMaterial} scale={1.16}>
-        <sphereGeometry args={[GLOBE_RADIUS, 48, 48]} />
+      <mesh material={atmosphereMaterial} scale={1.12}>
+        <sphereGeometry args={[GLOBE_RADIUS, 48, 32]} />
       </mesh>
     </group>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Airport pin
-// ---------------------------------------------------------------------------
-
-function AirportPin({
-  airport,
-  role,
-  isHovered,
-  onPointerOver,
-  onPointerOut,
-  onClick,
-  onDoubleClick,
-}: {
-  airport: Airport;
-  role: "departure" | "destination" | "none";
-  isHovered: boolean;
-  onPointerOver: () => void;
-  onPointerOut: () => void;
-  onClick: () => void;
-  onDoubleClick: () => void;
-}) {
-  const position = useMemo(
-    () => latLngToVector3(airport.lat, airport.lng, GLOBE_RADIUS + PIN_OFFSET),
-    [airport.lat, airport.lng],
-  );
-
-  // Pin color by role: teal for selected ends, bright white for idle pins.
-  const color =
-    role === "departure"
-      ? "#57f1db"
-      : role === "destination"
-        ? "#2dd4bf"
-        : isHovered
-          ? "#57f1db"
-          : "#ffffff";
-
-  const isActive = role !== "none" || isHovered;
-  const scale = isHovered ? 1.6 : 1.0;
-
-  // Back-face culling: hide pins on the far side of the globe so they cannot
-  // be hovered or clicked through the planet. Three.js raycasting skips
-  // invisible objects, so this also blocks interaction, not just rendering.
-  const groupRef = useRef<THREE.Group>(null);
-  const { camera } = useThree();
-  useFrame(() => {
-    const group = groupRef.current;
-    if (!group) return;
-    group.getWorldPosition(_worldPos);
-    _normal.copy(_worldPos).normalize();
-    _toCamera.copy(camera.position).sub(_worldPos);
-    group.visible = _normal.dot(_toCamera) > 0;
-  });
+/** All coastlines as one batched LineSegments draw call. */
+function Coastlines() {
+  const geometry = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute(
+      "position",
+      new THREE.BufferAttribute(buildCoastlinePositions(GLOBE_RADIUS + 0.003), 3),
+    );
+    return geo;
+  }, []);
+  useEffect(() => () => geometry.dispose(), [geometry]);
 
   return (
-    <group ref={groupRef} position={position}>
-      {/* Core dot */}
-      <mesh
-        onPointerOver={(e) => {
-          e.stopPropagation();
-          onPointerOver();
-        }}
-        onPointerOut={(e) => {
-          e.stopPropagation();
-          onPointerOut();
-        }}
-        onClick={(e) => {
-          e.stopPropagation();
-          onClick();
-        }}
-        onDoubleClick={(e) => {
-          e.stopPropagation();
-          onDoubleClick();
-        }}
-        scale={scale}
-      >
-        <sphereGeometry args={[0.008, 10, 10]} />
-        <meshBasicMaterial color={color} />
-      </mesh>
-      {/* Soft halo glow for active/selected pins */}
-      {isActive && (
-        <mesh scale={scale * 2.6}>
-          <sphereGeometry args={[0.008, 10, 10]} />
-          <meshBasicMaterial
-            color={color}
-            transparent
-            opacity={role !== "none" ? 0.25 : 0.16}
-          />
-        </mesh>
-      )}
-    </group>
+    <lineSegments geometry={geometry} frustumCulled={false}>
+      <lineBasicMaterial color="#2dd4bf" transparent opacity={0.42} />
+    </lineSegments>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Airport pins: one InstancedMesh, one culling pass per frame
+// ---------------------------------------------------------------------------
+
+const PIN_GEOMETRY_ARGS: [number, number, number] = [0.008, 10, 10];
+
+function AirportPins({
+  airports,
+  departure,
+  destination,
+  hoveredCode,
+  onSelect,
+  onForceDeparture,
+  onHover,
+}: {
+  airports: Airport[];
+  departure: Airport | null;
+  destination: Airport | null;
+  hoveredCode: string | null;
+  onSelect: (airport: Airport) => void;
+  onForceDeparture: (airport: Airport) => void;
+  onHover: (airport: Airport | null) => void;
+}) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const scalesRef = useRef<number[]>([]);
+  const hiddenRef = useRef<Set<number>>(new Set());
+
+  const positions = useMemo(
+    () =>
+      airports.map((a) =>
+        latLngToVector3(a.lat, a.lng, GLOBE_RADIUS + PIN_OFFSET),
+      ),
+    [airports],
+  );
+
+  const writeMatrix = useCallback(
+    (index: number, scale: number) => {
+      const mesh = meshRef.current;
+      if (!mesh) return;
+      _matrix.compose(positions[index], IDENTITY_QUAT, _scale.set(scale, scale, scale));
+      mesh.setMatrixAt(index, _matrix);
+      mesh.instanceMatrix.needsUpdate = true;
+    },
+    [positions],
+  );
+
+  useLayoutEffect(() => {
+    scalesRef.current = positions.map(() => 1);
+    hiddenRef.current = new Set();
+    positions.forEach((_, i) => writeMatrix(i, 1));
+  }, [positions, writeMatrix]);
+
+  // Pin colors by role; one instanceColor write per change, not per frame.
+  useEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const color = new THREE.Color();
+    airports.forEach((airport, i) => {
+      const selected =
+        airport.code === departure?.code || airport.code === destination?.code;
+      if (selected) color.set("#57f1db");
+      else if (hoveredCode === airport.code) color.set("#ffffff");
+      else color.set("#c7d4d1");
+      mesh.setColorAt(i, color);
+    });
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }, [airports, departure, destination, hoveredCode]);
+
+  // Single per-frame pass: hide far-side pins (also blocks their raycasts via
+  // hiddenRef) and ease the hovered pin's scale.
+  useFrame(({ camera }, delta) => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    mesh.getWorldQuaternion(_worldQuat);
+    mesh.getWorldPosition(_worldPos);
+    const k = Math.min(1, delta * 12);
+    for (let i = 0; i < positions.length; i++) {
+      _dir.copy(positions[i]).normalize().applyQuaternion(_worldQuat);
+      const visible = _dir.dot(_toCamera.copy(camera.position).sub(_worldPos)) > 0;
+      if (visible) hiddenRef.current.delete(i);
+      else hiddenRef.current.add(i);
+
+      const target = !visible
+        ? 0
+        : hoveredCode === airports[i].code
+          ? 1.8
+          : 1;
+      const current = scalesRef.current[i] ?? 1;
+      const next = current + (target - current) * k;
+      if (Math.abs(next - current) > 0.001) {
+        scalesRef.current[i] = next;
+        writeMatrix(i, next);
+      }
+    }
+  });
+
+  // Instanced events carry the hit instance id; hidden instances never react.
+  const resolve = (e: ThreeEvent<PointerEvent | MouseEvent>): Airport | null => {
+    const id = e.instanceId;
+    if (id == null || hiddenRef.current.has(id)) return null;
+    return airports[id] ?? null;
+  };
+
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, airports.length]}
+      frustumCulled={false}
+      onPointerOver={(e) => {
+        const airport = resolve(e);
+        if (!airport) return;
+        e.stopPropagation();
+        onHover(airport);
+      }}
+      onPointerOut={(e) => {
+        // Clear unconditionally: if the pin just rotated past the horizon the
+        // instance is already hidden, but the hover state must still reset.
+        e.stopPropagation();
+        onHover(null);
+      }}
+      onClick={(e) => {
+        const airport = resolve(e);
+        if (!airport) return;
+        e.stopPropagation();
+        onSelect(airport);
+      }}
+      onDoubleClick={(e) => {
+        const airport = resolve(e);
+        if (!airport) return;
+        e.stopPropagation();
+        onForceDeparture(airport);
+      }}
+    >
+      <sphereGeometry args={PIN_GEOMETRY_ARGS} />
+      <meshBasicMaterial toneMapped={false} />
+    </instancedMesh>
   );
 }
 
@@ -195,74 +274,84 @@ function FlightArc({
   phase?: Phase;
   reducedMotion: boolean;
 }) {
-  const points = useMemo(() => buildFlightArc(start, end), [start, end]);
-  const geometry = useMemo(
-    () => new THREE.BufferGeometry().setFromPoints(points),
-    [points],
+  const points = useMemo(() => buildFlightArc(start, end, 96), [start, end]);
+
+  // Full arc and traveled arc share the same point data; the traveled line is
+  // revealed with setDrawRange so session ticks never reallocate geometry.
+  const { fullLine, traveledLine } = useMemo(() => {
+    const fullGeometry = new THREE.BufferGeometry().setFromPoints(points);
+    const traveledGeometry = new THREE.BufferGeometry().setFromPoints(points);
+    traveledGeometry.setDrawRange(0, 0);
+    const full = new THREE.Line(
+      fullGeometry,
+      new THREE.LineBasicMaterial({
+        color: "#2dd4bf",
+        transparent: true,
+        opacity: 0.32,
+      }),
+    );
+    const traveled = new THREE.Line(
+      traveledGeometry,
+      new THREE.LineBasicMaterial({ color: "#57f1db" }),
+    );
+    traveled.visible = false;
+    return { fullLine: full, traveledLine: traveled };
+  }, [points]);
+
+  useEffect(
+    () => () => {
+      fullLine.geometry.dispose();
+      (fullLine.material as THREE.Material).dispose();
+      traveledLine.geometry.dispose();
+      (traveledLine.material as THREE.Material).dispose();
+    },
+    [fullLine, traveledLine],
   );
 
-  const planeRef = useRef<THREE.Mesh>(null);
-
-  // Effective progress along the arc for the plane position.
   const effectiveProgress =
     flightProgress == null ? null : phaseProgress(flightProgress, phase);
+  const cutoff =
+    effectiveProgress == null
+      ? 0
+      : Math.max(0, Math.round(effectiveProgress * (points.length - 1)) + 1);
 
-  // For idle preview (no session), animate the plane slowly along the arc
-  // unless reduced motion is on.
+  useEffect(() => {
+    traveledLine.geometry.setDrawRange(0, cutoff);
+    traveledLine.visible = cutoff > 1;
+  }, [traveledLine, cutoff]);
+
+  const planeRef = useRef<THREE.Mesh>(null);
   const idleT = useRef(0);
+
   useFrame((_, delta) => {
+    const plane = planeRef.current;
+    if (!plane) return;
+    let t: number;
     if (effectiveProgress != null) {
-      const idx = Math.min(
-        points.length - 1,
-        Math.max(0, Math.floor(effectiveProgress * (points.length - 1))),
-      );
-      planeRef.current?.position.copy(points[idx]);
+      t = effectiveProgress;
     } else if (!reducedMotion) {
-      idleT.current = (idleT.current + delta * 0.08) % 1;
-      const idx = Math.floor(idleT.current * (points.length - 1));
-      planeRef.current?.position.copy(points[idx]);
+      idleT.current = (idleT.current + delta * 0.05) % 1;
+      t = idleT.current;
     } else {
-      planeRef.current?.position.copy(points[0]);
+      t = 0;
     }
-  });
-
-  // Traveled portion of the arc (bright) vs full arc (dim).
-  const traveledPoints = useMemo(() => {
-    if (effectiveProgress == null) return [];
-    const cutoff = Math.max(
-      1,
-      Math.floor(effectiveProgress * (points.length - 1)) + 1,
+    const idx = Math.min(
+      points.length - 2,
+      Math.max(0, Math.floor(t * (points.length - 1))),
     );
-    return points.slice(0, cutoff + 1);
-  }, [points, effectiveProgress]);
-
-  // THREE.Line objects built directly to avoid the JSX <line> tag, which
-  // TypeScript resolves to the SVG <line> element type.
-  const fullArcLine = useMemo(() => {
-    const mat = new THREE.LineBasicMaterial({
-      color: "#2dd4bf",
-      transparent: true,
-      opacity: 0.35,
-    });
-    return new THREE.Line(geometry, mat);
-  }, [geometry]);
-
-  const traveledLine = useMemo(() => {
-    const mat = new THREE.LineBasicMaterial({ color: "#57f1db" });
-    const geo = new THREE.BufferGeometry().setFromPoints(traveledPoints);
-    return new THREE.Line(geo, mat);
-  }, [traveledPoints]);
+    plane.position.copy(points[idx]);
+    // Orient the cone along the path tangent.
+    _tangent.copy(points[idx + 1]).sub(points[idx]).normalize();
+    plane.quaternion.setFromUnitVectors(UP, _tangent);
+  });
 
   return (
     <group>
-      {/* Full arc (dim) */}
-      <primitive object={fullArcLine} />
-      {/* Traveled portion (bright) */}
-      {traveledPoints.length > 1 && <primitive object={traveledLine} />}
-      {/* Plane */}
+      <primitive object={fullLine} />
+      <primitive object={traveledLine} />
       <mesh ref={planeRef}>
-        <coneGeometry args={[0.016, 0.042, 8]} />
-        <meshBasicMaterial color="#57f1db" />
+        <coneGeometry args={[0.014, 0.04, 8]} />
+        <meshBasicMaterial color="#57f1db" toneMapped={false} />
       </mesh>
     </group>
   );
@@ -337,7 +426,7 @@ function GlobeGroup({
     }
 
     if (autoRotateActive.current && !reducedMotion) {
-      group.rotateY(delta * 0.05);
+      group.rotateY(delta * 0.04);
     }
   });
 
@@ -444,44 +533,24 @@ export default function FlightGlobe({
     <Canvas
       camera={{ position: [0, 0, 2.6], fov: 45 }}
       dpr={[1, 2]}
-      gl={{ antialias: true, alpha: true }}
+      gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
       className="flightGlobeCanvas"
     >
-      <ambientLight intensity={0.6} />
-      <directionalLight position={[5, 3, 5]} intensity={0.8} />
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[4, 2.5, 5]} intensity={1.2} />
+      <directionalLight position={[-4, -1.5, -3]} intensity={0.2} />
       <GlobeGroup spinTarget={spinTarget} reducedMotion={reducedMotion}>
         <GlobeSphere />
-        {airports.map((airport) => {
-          const role =
-            airport.code === departure?.code
-              ? "departure"
-              : airport.code === destination?.code
-                ? "destination"
-                : "none";
-          return (
-            <AirportPin
-              key={airport.code}
-              airport={airport}
-              role={role}
-              isHovered={hoveredAirport?.code === airport.code}
-              onPointerOver={() => setHoveredAirport(airport)}
-              onPointerOut={() => {
-                if (hoveredAirport?.code === airport.code) {
-                  setHoveredAirport(null);
-                }
-              }}
-              onClick={() => handleClick(airport)}
-              onDoubleClick={() => {
-                onForceDeparture(airport);
-                setSpinTarget({
-                  lat: airport.lat,
-                  lng: airport.lng,
-                  nonce: Date.now(),
-                });
-              }}
-            />
-          );
-        })}
+        <Coastlines />
+        <AirportPins
+          airports={airports}
+          departure={departure}
+          destination={destination}
+          hoveredCode={hoveredAirport?.code ?? null}
+          onSelect={handleClick}
+          onForceDeparture={onForceDeparture}
+          onHover={setHoveredAirport}
+        />
         {start && end && (
           <FlightArc
             start={start}

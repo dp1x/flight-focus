@@ -262,8 +262,8 @@ export default function FlightGlobeView({
       </div>
 
       <div className="globeHint">
-        Click a pin to set <kbd>departure</kbd> then <kbd>destination</kbd> ·
-        double-click for departure · <kbd>⌫</kbd> clears
+        Click a pin to set departure, then destination. Double-click sets
+        departure. Backspace clears.
       </div>
     </>
   );

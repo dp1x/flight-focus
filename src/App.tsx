@@ -14,6 +14,7 @@ import FlightGlobeView from "./map/FlightGlobeView";
 import { type Airport } from "./map/AirportSearch";
 import AchievementsPanel from "./components/AchievementsPanel";
 import DataControls from "./components/DataControls";
+import { PlaneIcon } from "./components/icons";
 import airportsData from "./data/airports.json";
 import {
   DEFAULT_DURATION_MINUTES,
@@ -167,7 +168,7 @@ export default function App() {
       <header className="topBar">
         <div className="brand">
           <span className="brandMark" aria-hidden="true">
-            ✈
+            <PlaneIcon size={15} />
           </span>
           Flight Focus
         </div>
@@ -178,7 +179,7 @@ export default function App() {
               {session ? "Time to landing" : "Estimated mission time"}
             </span>
             <span className="value">
-              {formatDuration(visibleSeconds).padStart(7, "0")}
+              {formatDuration(visibleSeconds).padStart(5, "0")}
             </span>
           </div>
           <span className="pill" data-phase={phaseLabel}>
@@ -216,7 +217,14 @@ export default function App() {
               <span className={`routeEnd${departure ? "" : " empty"}`}>
                 {departure ? departure.code : "---"}
               </span>
-              <span className={`routeLine${departure && destination ? " active" : ""}`} />
+              <span
+                className={`routeLine${departure && destination ? " active" : ""}`}
+                aria-hidden="true"
+              >
+                <span className="routePlane">
+                  <PlaneIcon size={12} />
+                </span>
+              </span>
               <span className={`routeEnd${destination ? "" : " empty"}`}>
                 {destination ? destination.code : "---"}
               </span>
@@ -232,7 +240,7 @@ export default function App() {
                 </span>
               )}
               <span className="missionStats">
-                {stats.totalSessions} missions · {stats.totalMinutes} min flown
+                {stats.totalSessions} missions, {stats.totalMinutes} min flown
               </span>
             </div>
           </div>

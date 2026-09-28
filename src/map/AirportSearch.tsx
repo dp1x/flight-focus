@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import airportsData from "../data/airports.json";
+import "./AirportSearch.css";
 
 export interface Airport {
   code: string;
@@ -128,7 +129,9 @@ export default function AirportSearch({
       >
         {selected ? (
           <>
-            <img className="flag" src={`https://flagcdn.com/w40/${selected.countryCode}.png`} alt={selected.country} loading="lazy" />
+            <span className="flag" aria-hidden="true">
+              {selected.flag}
+            </span>
             <span className="code">{selected.code}</span>
             <span className="city">{selected.city}</span>
           </>
@@ -176,7 +179,9 @@ export default function AirportSearch({
                   role="option"
                   aria-selected={isSelected}
                 >
-                  <img className="resultFlag" src={`https://flagcdn.com/w40/${airport.countryCode}.png`} alt={airport.country} loading="lazy" />
+                  <span className="resultFlag" aria-hidden="true">
+                    {airport.flag}
+                  </span>
                   <span className="resultCode">{airport.code}</span>
                   <span className="resultName">
                     {airport.name}

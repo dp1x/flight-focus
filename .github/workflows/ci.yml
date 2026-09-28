@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast feedback. Everything here is pure JS/TS, so it belongs on the cheapest
+  # runner rather than waiting behind the Windows ARM64 queue.
+  frontend:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Source integrity
+        run: npm run check:integrity
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Production build
+        run: npm run build
+
+  # The Rust core is only ever compiled here, never on the developer's laptop.
+  rust:
+    name: Rust tests (Windows ARM64)
+    runs-on: windows-11-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # Advisory for now: the existing code has not been held to clippy's bar,
+      # so this reports rather than blocks. Tighten to a required check once
+      # the baseline is clean.
+      - name: Clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml

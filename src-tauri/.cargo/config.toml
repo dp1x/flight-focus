@@ -1,5 +1,0 @@
-# Pin builds to x86_64-pc-windows-msvc so they use the installed VS Build Tools
-# x64 MSVC toolchain. The machine's default rustup toolchain targets aarch64,
-# whose MSVC libs are not installed here.
-[build]
-target = "x86_64-pc-windows-msvc"

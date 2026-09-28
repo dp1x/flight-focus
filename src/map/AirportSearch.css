@@ -1,0 +1,203 @@
+/*
+ * Airport search dropdown. This file is the single source of truth for the
+ * search styles (App.css deliberately does not duplicate them).
+ */
+
+.searchContainer {
+  position: relative;
+  width: 100%;
+  z-index: 20;
+}
+
+.searchTrigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  backdrop-filter: blur(var(--panel-blur));
+  -webkit-backdrop-filter: blur(var(--panel-blur));
+  border: 1px solid var(--border);
+  cursor: pointer;
+  color: var(--text-1);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  text-align: left;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+
+.searchTrigger:hover {
+  border-color: var(--border-strong);
+}
+
+.searchTrigger .flag {
+  font-size: var(--text-lg);
+  line-height: 1;
+}
+
+.searchTrigger .code {
+  font-weight: 600;
+  font-size: var(--text-sm);
+  letter-spacing: 0.03em;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.searchTrigger .city {
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.searchTrigger .placeholderText {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+/* Click-away catcher behind the open panel. */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 49;
+  background: transparent;
+}
+
+.searchPanel {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  transform: none;
+  z-index: 50;
+  min-width: 380px;
+  width: auto;
+  background: var(--panel);
+  backdrop-filter: blur(var(--panel-blur));
+  -webkit-backdrop-filter: blur(var(--panel-blur));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+  opacity: 1;
+  transform-origin: top left;
+  transition: opacity var(--dur-base) var(--ease-out);
+}
+
+.searchPanel.closed {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.searchInput {
+  width: 100%;
+  padding: var(--space-4);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-1);
+  font-size: var(--text-base);
+  outline: none;
+  font-family: inherit;
+}
+
+.searchInput::placeholder {
+  color: var(--text-3);
+}
+
+.searchResults {
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.searchResults::-webkit-scrollbar {
+  width: 4px;
+}
+
+.searchResults::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.searchResults::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 2px;
+}
+
+.searchEmpty {
+  padding: var(--space-5) var(--space-4);
+  text-align: center;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+
+.searchResult {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+}
+
+.searchResult:hover,
+.searchResult.active {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+:root[data-theme="light"] .searchResult:hover,
+:root[data-theme="light"] .searchResult.active {
+  background: rgba(10, 20, 20, 0.05);
+}
+
+.searchResult.selected {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+:root[data-theme="light"] .searchResult.selected {
+  background: rgba(10, 20, 20, 0.08);
+}
+
+.resultFlag {
+  font-size: var(--text-base);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.resultCode {
+  font-weight: 600;
+  color: var(--text-1);
+  min-width: 40px;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.resultName {
+  flex: 1;
+  color: var(--text-2);
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resultMeta {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+
+.checkmark {
+  color: var(--accent);
+  margin-left: auto;
+  font-size: var(--text-sm);
+  flex-shrink: 0;
+}
+
+@media (max-width: 640px) {
+  .searchPanel {
+    min-width: 0;
+    width: calc(100vw - 40px);
+  }
+}
