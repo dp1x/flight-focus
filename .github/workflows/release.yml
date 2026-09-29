@@ -109,3 +109,6 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
           draft: false
+          # Semver prerelease suffixes (v0.1.0-alpha) publish as prereleases;
+          # plain tags (v0.2.0) publish as stable releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
