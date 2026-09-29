@@ -6,6 +6,10 @@ great-circle arc between them on a 3D globe while the timer counts down.
 
 No account. No telemetry. No network requests at runtime.
 
+![Flight Focus running on Windows — the mission-control globe view](docs/screenshot.png)
+
+***Still working on it give me some time on the frontend lol***
+
 ## How it is built
 
 | Layer | Technology |
